@@ -274,6 +274,8 @@
       stats: result.stats,
       packets: result.packets,
       connections: conns,
+      // 分片证据（含不完整 / 冲突 / 不合法的组）与页面展示同源，一并冻结导出
+      fragmentGroups: result.fragmentGroups || [],
     };
   }
 
@@ -394,6 +396,51 @@
       });
       lines.push("");
     });
+
+    var fragGroups = result.fragmentGroups || [];
+    if (fragGroups.length) {
+      lines.push("=== IPv4 Fragment Groups ===");
+      fragGroups.forEach(function (g) {
+        lines.push(
+          "group " +
+            g.key +
+            "  status=" +
+            g.status +
+            "  members=[" +
+            g.indexes.join(",") +
+            "]" +
+            (g.totalLen != null ? "  totalLen=" + g.totalLen : "  totalLen=unknown") +
+            (g.decodedPacket != null ? "  decodedPacket=" + g.decodedPacket : "") +
+            (g.duplicateBytes ? "  duplicateBytes=" + g.duplicateBytes : ""),
+        );
+        (g.reasons || []).forEach(function (r) {
+          lines.push("  reason: " + r);
+        });
+        (g.holes || []).forEach(function (h) {
+          lines.push(
+            "  HOLE " +
+              h.start +
+              ".." +
+              h.end +
+              " (" +
+              (h.end - h.start) +
+              " bytes missing, NOT reconstructed)",
+          );
+        });
+        (g.conflicts || []).forEach(function (cf) {
+          var parts = Object.keys(cf.byPkt).map(function (pi) {
+            return (
+              "pkt" + pi + "=0x" + cf.byPkt[pi].toString(16).padStart(2, "0")
+            );
+          });
+          lines.push("  CONFLICT offset " + cf.pos + ": " + parts.join(", "));
+        });
+        (g.segments || []).forEach(function (s) {
+          lines.push("  segment " + s.start + ".." + s.end + " <- pkt" + s.pktIndex);
+        });
+      });
+      lines.push("");
+    }
 
     lines.push("=== Packets ===");
     lines.push(

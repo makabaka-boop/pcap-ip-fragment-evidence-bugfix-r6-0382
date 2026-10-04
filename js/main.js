@@ -171,13 +171,18 @@
     (r.fragmentGroups || []).forEach(function (g) {
       msgs.push(
         "IP 分片组 " +
-          g.key +
+          g.srcIp +
+          "→" +
+          g.dstIp +
+          " id=" +
+          g.ipId +
           "：" +
           g.status +
-          "，缺口 " +
-          JSON.stringify(g.holes) +
-          "，冲突 " +
-          JSON.stringify(g.conflicts),
+          (g.reasons && g.reasons.length
+            ? "（" + g.reasons.join("；") + "）"
+            : "") +
+          (g.holes.length ? "，缺口 " + JSON.stringify(g.holes) : "") +
+          (g.conflicts.length ? "，冲突 " + g.conflicts.length + " 处" : ""),
       );
     });
     showStatus(st ? "fatal" : "info", msgs.join(" "));
@@ -258,13 +263,13 @@
   }
 
   function renderDetail() {
+    els.detail.innerHTML = "";
+    renderFragmentGroups(); // 文件级分片证据（若有），与连接无关，和冻结导出同源
     var c = selectedConn();
     if (!c) {
-      els.detail.innerHTML = "";
       els.detail.appendChild(placeholder("该文件中没有可显示的 TCP 连接"));
       return;
     }
-    els.detail.innerHTML = "";
 
     // 连接标题 + 方向切换
     var hdr = document.createElement("div");
@@ -329,6 +334,90 @@
     else renderConflicts(c, d);
   }
 
+  /* ---------------- 渲染：IPv4 分片证据（文件级） ---------------- */
+
+  function renderFragmentGroups() {
+    var groups = (state.result && state.result.fragmentGroups) || [];
+    if (!groups.length) return;
+    var box = document.createElement("div");
+    box.className = "item";
+    var html = "<b>IPv4 分片证据（" + groups.length + " 组）</b>";
+    groups.forEach(function (g) {
+      var cls = g.status === "complete" ? "ok" : "gap";
+      html +=
+        '<div class="frag-group"><b>' +
+        esc(g.srcIp) +
+        " → " +
+        esc(g.dstIp) +
+        "</b>" +
+        ' <span class="kv">协议 ' +
+        g.protocol +
+        " · IP ID " +
+        g.ipId +
+        "</span> " +
+        '<span class="badge ' +
+        cls +
+        '">' +
+        esc(g.status) +
+        "</span><br>" +
+        '<span class="kv">成员包 [' +
+        g.indexes.join(", ") +
+        "]" +
+        (g.totalLen != null ? " · 总长 " + g.totalLen : " · 总长未知") +
+        (g.decodedPacket != null ? " · 正文落在 pkt" + g.decodedPacket : "") +
+        (g.duplicateBytes ? " · 重复字节 " + g.duplicateBytes : "") +
+        "</span>";
+      (g.reasons || []).forEach(function (r) {
+        html += '<br><span class="kv">· ' + esc(r) + "</span>";
+      });
+      (g.holes || []).forEach(function (h) {
+        html +=
+          '<br><span class="badge gap">缺口 ' +
+          h.start +
+          ".." +
+          h.end +
+          "（" +
+          (h.end - h.start) +
+          " 字节，未填充）</span>";
+      });
+      (g.conflicts || []).forEach(function (cf) {
+        var cand = Object.keys(cf.byPkt)
+          .map(Number)
+          .sort(function (a, b) {
+            return a - b;
+          })
+          .map(function (pi) {
+            return (
+              "pkt" +
+              pi +
+              "=<code>0x" +
+              cf.byPkt[pi].toString(16).padStart(2, "0") +
+              "</code>"
+            );
+          })
+          .join("，");
+        html +=
+          '<br><span class="badge conflict">冲突@' +
+          cf.pos +
+          "</span> " +
+          cand;
+      });
+      if (g.segments && g.segments.length) {
+        html +=
+          '<br><span class="kv">贡献：' +
+          g.segments
+            .map(function (s) {
+              return s.start + ".." + s.end + "←pkt" + s.pktIndex;
+            })
+            .join("，") +
+          "</span>";
+      }
+      html += "</div>";
+    });
+    box.innerHTML = html;
+    els.detail.appendChild(box);
+  }
+
   function pktEndpoints(p) {
     return (
       esc(p.srcIp || "?") +
@@ -374,6 +463,13 @@
       if (p.payloadTruncated) marks += '<span class="m-trunc">载荷截断</span>';
       if (p.snapTruncated && !p.payloadTruncated)
         marks += '<span class="m-trunc">snap截断</span>';
+      if (p.fragmentIndexes && p.fragmentIndexes.length)
+        marks +=
+          '<span class="m-frag" title="由 IPv4 分片重组，内容来源包：pkt ' +
+          p.fragmentIndexes.join(", ") +
+          '">分片×' +
+          p.fragmentIndexes.length +
+          "</span>";
       var last = p.discardReason
         ? '<span class="discard">' + esc(p.discardReason) + "</span>"
         : marks;

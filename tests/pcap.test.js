@@ -601,6 +601,294 @@ test("桥接段与缺口两侧字节冲突：冲突区间连续不丢字节", ()
   ]);
 });
 
+/* ---------- L. IPv4 分片重组 ---------- */
+
+const A_IP = Buffer.from([1, 2, 3, 4]),
+  B_IP = Buffer.from([5, 6, 7, 8]);
+
+// 造一段“完整 TCP 报文（TCP 头+载荷）”的字节，供切分片用
+function tcpSegmentBytes(o) {
+  var frame = B.buildFrame(tcpRec(o));
+  var ihl = o.ihl == null ? 20 : o.ihl;
+  return frame.slice(14 + ihl);
+}
+
+// 把 tcpBytes 按 cuts 切成 IPv4 分片记录（除末片外每片长度须为 8 的倍数）
+function fragRecs(tcpBytes, opts) {
+  var cuts = opts.cuts || [];
+  var bounds = [0].concat(cuts).concat([tcpBytes.length]);
+  var recs = [];
+  for (var i = 0; i < bounds.length - 1; i++) {
+    var s = bounds[i],
+      e = bounds[i + 1];
+    var more = i < bounds.length - 2;
+    recs.push({
+      srcIp: opts.srcIp,
+      dstIp: opts.dstIp,
+      ipId: opts.ipId,
+      protocol: 6,
+      fragWord: (more ? 0x2000 : 0) | ((s / 8) & 0x1fff),
+      rawIpPayload: tcpBytes.slice(s, e),
+    });
+  }
+  return recs;
+}
+
+test("IPv4 分片：乱序到达按偏移重组，内容可追溯源包", () => {
+  const seg = tcpSegmentBytes({
+    flags: PSH | ACK,
+    seq: 1000,
+    payload: B.str("HELLO-FRAGMENTED-WORLD"),
+  }); // 42 字节
+  const frags = fragRecs(seg, { srcIp: A_IP, dstIp: B_IP, ipId: 777, cuts: [16, 32] });
+  // 乱序：中、末、首
+  const res = reas(B.buildPcap([frags[1], frags[2], frags[0]]));
+  assert.equal(res.fragmentGroups.length, 1);
+  const g = res.fragmentGroups[0];
+  assert.equal(g.status, "complete");
+  assert.equal(g.totalLen, 42);
+  assert.deepEqual(g.indexes, [0, 1, 2]);
+  // 贡献图：每一段都能追到来源包
+  assert.deepEqual(g.segments, [
+    { start: 0, end: 16, pktIndex: 2 },
+    { start: 16, end: 32, pktIndex: 0 },
+    { start: 32, end: 42, pktIndex: 1 },
+  ]);
+  // 首片是文件中第 3 个包（index 2），解码落在它身上
+  const decoded = res.packets.find((p) => p.fragmentIndexes);
+  assert.ok(decoded);
+  assert.equal(decoded.index, 2);
+  assert.equal(g.decodedPacket, 2);
+  assert.deepEqual(decoded.fragmentIndexes, [0, 1, 2]);
+  assert.equal(decoded.discardReason, null);
+  // 其余成员包不进入 TCP 重组
+  assert.equal(res.packets[0].discardReason, "ip_fragment");
+  assert.equal(res.packets[1].discardReason, "ip_fragment");
+  // TCP 流内容正确
+  assert.equal(res.connections.length, 1);
+  assert.equal(
+    reassembledText(res.connections[0].dirs[0]),
+    "HELLO-FRAGMENTED-WORLD",
+  );
+  // 冻结导出：fragmentGroups 与包级 fragmentIndexes 都在
+  const json = JSON.parse(View.exportJson(res));
+  assert.equal(json.fragmentGroups.length, 1);
+  assert.equal(json.fragmentGroups[0].status, "complete");
+  assert.deepEqual(
+    json.packets.find((p) => p.index === 2).fragmentIndexes,
+    [0, 1, 2],
+  );
+  const txt = View.exportText(res);
+  assert.match(txt, /Fragment Groups/);
+  assert.match(txt, /decodedPacket=2/);
+});
+
+test("IPv4 分片：完全重复的分片不增加内容", () => {
+  const seg = tcpSegmentBytes({
+    flags: PSH | ACK,
+    seq: 1000,
+    payload: B.str("ABCDEFGH"),
+  }); // 28 字节
+  const frags = fragRecs(seg, { srcIp: A_IP, dstIp: B_IP, ipId: 900, cuts: [16] });
+  // 首片重复到达一次
+  const res = reas(B.buildPcap([frags[0], frags[0], frags[1]]));
+  const g = res.fragmentGroups[0];
+  assert.equal(g.status, "complete");
+  assert.equal(g.totalLen, 28);
+  assert.equal(g.duplicateBytes, 16);
+  assert.equal(res.connections.length, 1);
+  assert.equal(reassembledText(res.connections[0].dirs[0]), "ABCDEFGH");
+  // 正文只追溯实际供字节的包；重复成员仍留在组索引中
+  const decoded = res.packets.find((p) => p.fragmentIndexes);
+  assert.deepEqual(decoded.fragmentIndexes, [0, 2]);
+  assert.deepEqual(g.indexes, [0, 1, 2]);
+});
+
+test("IPv4 分片：缺失中间分片 -> 显式缺口，不产出正文", () => {
+  const seg = tcpSegmentBytes({
+    flags: PSH | ACK,
+    seq: 1000,
+    payload: B.str("HELLO-FRAGMENTED-WORLD"),
+  });
+  const frags = fragRecs(seg, { srcIp: A_IP, dstIp: B_IP, ipId: 901, cuts: [16, 32] });
+  const res = reas(B.buildPcap([frags[0], frags[2]])); // 缺 [16,32)
+  const g = res.fragmentGroups[0];
+  assert.equal(g.status, "incomplete");
+  assert.deepEqual(g.holes, [{ start: 16, end: 32 }]);
+  // 没有可信正文进入 TCP 重组
+  assert.equal(res.connections.length, 0);
+  assert.ok(res.packets.every((p) => p.discardReason === "ip_fragment"));
+  const json = JSON.parse(View.exportJson(res));
+  assert.equal(json.fragmentGroups[0].status, "incomplete");
+  assert.deepEqual(json.fragmentGroups[0].holes, [{ start: 16, end: 32 }]);
+  assert.match(View.exportText(res), /HOLE 16\.\.32/);
+});
+
+test("IPv4 分片：缺少首片 -> incomplete，不产生连接", () => {
+  const seg = tcpSegmentBytes({
+    flags: PSH | ACK,
+    seq: 1000,
+    payload: B.str("HELLO-FRAGMENTED-WORLD"),
+  });
+  const frags = fragRecs(seg, { srcIp: A_IP, dstIp: B_IP, ipId: 908, cuts: [16, 32] });
+  const res = reas(B.buildPcap([frags[1], frags[2]]));
+  const g = res.fragmentGroups[0];
+  assert.equal(g.status, "incomplete");
+  assert.equal(g.missingFirst, true);
+  assert.deepEqual(g.holes, [{ start: 0, end: 16 }]);
+  assert.equal(res.connections.length, 0);
+});
+
+test("IPv4 分片：不同地址相同 IP ID 互不干扰", () => {
+  const seg1 = tcpSegmentBytes({ flags: PSH | ACK, seq: 1000, payload: B.str("AAAAAAA1") });
+  const seg2 = tcpSegmentBytes({
+    flags: PSH | ACK,
+    seq: 2000,
+    payload: B.str("BBBBBBB2"),
+    srcPort: 2222,
+  });
+  const f1 = fragRecs(seg1, { srcIp: A_IP, dstIp: B_IP, ipId: 55, cuts: [16] });
+  const f2 = fragRecs(seg2, {
+    srcIp: Buffer.from([9, 9, 9, 9]),
+    dstIp: B_IP,
+    ipId: 55,
+    cuts: [16],
+  });
+  // 两组相同 IP ID 的分片交叉到达
+  const res = reas(B.buildPcap([f1[0], f2[0], f1[1], f2[1]]));
+  assert.equal(res.fragmentGroups.length, 2);
+  assert.ok(res.fragmentGroups.every((g) => g.status === "complete"));
+  assert.equal(res.connections.length, 2);
+  const texts = res.connections
+    .map((c) => reassembledText(c.dirs[0]) + reassembledText(c.dirs[1]))
+    .sort();
+  assert.deepEqual(texts, ["AAAAAAA1", "BBBBBBB2"]);
+});
+
+test("IPv4 分片：重叠字节矛盾 -> 冲突留证，不产出正文", () => {
+  const seg = tcpSegmentBytes({
+    flags: PSH | ACK,
+    seq: 1000,
+    payload: B.str("HELLO-FRAGMENTED-WORLD"),
+  });
+  const frags = fragRecs(seg, { srcIp: A_IP, dstIp: B_IP, ipId: 902, cuts: [16, 32] });
+  // 伪造一片与 [8,16) 重叠但字节不同
+  const evil = {
+    srcIp: A_IP,
+    dstIp: B_IP,
+    ipId: 902,
+    protocol: 6,
+    fragWord: 0x2000 | 1, // offset 8, MF
+    rawIpPayload: Buffer.alloc(8, 0x58), // 'XXXXXXXX'
+  };
+  const res = reas(B.buildPcap([frags[0], evil, frags[1], frags[2]]));
+  const g = res.fragmentGroups[0];
+  assert.equal(g.status, "conflict");
+  assert.equal(g.conflicts.length, 8);
+  const c0 = g.conflicts[0];
+  assert.equal(c0.pos, 8);
+  // 两个候选字节都保留，各自带来源包号
+  assert.deepEqual(c0.byPkt, { 0: seg[8], 1: 0x58 });
+  assert.equal(res.connections.length, 0);
+  const json = JSON.parse(View.exportJson(res));
+  assert.equal(json.fragmentGroups[0].conflicts.length, 8);
+  assert.match(View.exportText(res), /CONFLICT offset 8/);
+});
+
+test("IPv4 分片：末片总长不一致 / 分片越出总长 -> length_mismatch，不产出正文", () => {
+  const seg = tcpSegmentBytes({
+    flags: PSH | ACK,
+    seq: 1000,
+    payload: B.str("HELLO-FRAGMENTED-WORLD"),
+  }); // 42
+  const frags = fragRecs(seg, { srcIp: A_IP, dstIp: B_IP, ipId: 903, cuts: [16, 32] });
+  // 第二个“末片”：同样 offset 32 但只声明 8 字节（总长 40 ≠ 42）
+  const altLast = {
+    srcIp: A_IP,
+    dstIp: B_IP,
+    ipId: 903,
+    protocol: 6,
+    fragWord: (32 / 8) & 0x1fff, // offset 32, MF=0
+    rawIpPayload: seg.slice(32, 40),
+  };
+  const res = reas(B.buildPcap([frags[0], frags[1], frags[2], altLast]));
+  const g = res.fragmentGroups[0];
+  assert.equal(g.status, "length_mismatch");
+  assert.ok(g.reasons.length > 0);
+  assert.equal(res.connections.length, 0);
+
+  // 分片声明越出末片总长同样算长度不一致
+  const frags2 = fragRecs(seg, { srcIp: A_IP, dstIp: B_IP, ipId: 904, cuts: [16, 32] });
+  const beyond = {
+    srcIp: A_IP,
+    dstIp: B_IP,
+    ipId: 904,
+    protocol: 6,
+    fragWord: 0x2000 | (40 / 8), // offset 40, MF；40+16=56 > 42
+    rawIpPayload: seg.slice(26, 42),
+  };
+  const res2 = reas(B.buildPcap([frags2[0], frags2[1], frags2[2], beyond]));
+  assert.equal(res2.fragmentGroups[0].status, "length_mismatch");
+  assert.equal(res2.connections.length, 0);
+});
+
+test("IPv4 分片：非末片长度不是 8 的倍数 -> invalid，不产出正文", () => {
+  const seg = tcpSegmentBytes({ flags: PSH | ACK, seq: 1000, payload: B.str("HELLO") });
+  const bad = {
+    srcIp: A_IP,
+    dstIp: B_IP,
+    ipId: 905,
+    protocol: 6,
+    fragWord: 0x2000, // offset 0, MF
+    rawIpPayload: seg.slice(0, 20), // 20 不是 8 的倍数
+  };
+  const res = reas(B.buildPcap([bad]));
+  const g = res.fragmentGroups[0];
+  assert.equal(g.status, "invalid");
+  assert.equal(res.connections.length, 0);
+});
+
+test("IPv4 分片：分片抓包不完整 -> 声明尾部成缺口，不产出正文", () => {
+  const seg = tcpSegmentBytes({
+    flags: PSH | ACK,
+    seq: 1000,
+    payload: B.str("HELLO-FRAGMENTED-WORLD"),
+  }); // 42
+  const frags = fragRecs(seg, { srcIp: A_IP, dstIp: B_IP, ipId: 906, cuts: [16, 32] });
+  // 中间片声明 16 字节数据，但尾部 8 字节没抓到
+  const midFull = B.buildFrame({
+    srcIp: A_IP,
+    dstIp: B_IP,
+    ipId: 906,
+    protocol: 6,
+    fragWord: 0x2000 | 2, // offset 16, MF
+    rawIpPayload: seg.slice(16, 32),
+  });
+  const pcap = B.buildPcap([
+    frags[0],
+    { frame: midFull, origLen: midFull.length, inclOverride: midFull.length - 8 },
+    frags[2],
+  ]);
+  const res = reas(pcap);
+  const g = res.fragmentGroups[0];
+  assert.equal(g.status, "incomplete");
+  assert.deepEqual(g.holes, [{ start: 24, end: 32 }]);
+  assert.equal(res.connections.length, 0);
+});
+
+test("IPv4 分片：完整分片报文与普通未分片报文进入同一 TCP 重组", () => {
+  const seg = tcpSegmentBytes({ flags: PSH | ACK, seq: 1000, payload: B.str("HELLO-") });
+  const frags = fragRecs(seg, { srcIp: A_IP, dstIp: B_IP, ipId: 907, cuts: [16] });
+  const normal = tcpRec({ flags: PSH | ACK, seq: 1006, payload: B.str("WORLD") });
+  // 分片乱序 + 普通报文穿插到达
+  const res = reas(B.buildPcap([frags[1], normal, frags[0]]));
+  assert.equal(res.fragmentGroups[0].status, "complete");
+  assert.equal(res.connections.length, 1);
+  assert.equal(reassembledText(res.connections[0].dirs[0]), "HELLO-WORLD");
+  const decoded = res.packets.find((p) => p.fragmentIndexes);
+  assert.deepEqual(decoded.fragmentIndexes, [0, 2]);
+});
+
 /* ---------- K. 随机对拍 ---------- */
 
 function mulberry32(seed) {

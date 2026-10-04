@@ -7,16 +7,20 @@ function u8(n) {
   return n & 0xff;
 }
 
-/* 构造一个以太网/IPv4/TCP 记录的帧字节（不含 PCAP 记录头） */
+/* 构造一个以太网/IPv4/TCP 记录的帧字节（不含 PCAP 记录头）。
+ * opts.rawIpPayload：直接指定 IP 载荷原始字节（用于构造非首片分片，
+ * 此时不拼 TCP 头，totalLen 按 IP 头 + rawIpPayload 计算）。 */
 function buildFrame(opts) {
   var payload = opts.payload || Buffer.alloc(0);
+  var rawIp = opts.rawIpPayload != null ? Buffer.from(opts.rawIpPayload) : null;
   var srcMac = opts.srcMac || Buffer.from("001122334455", "hex");
   var dstMac = opts.dstMac || Buffer.from("6677889900aa", "hex");
   var ethType = opts.ethType == null ? 0x0800 : opts.ethType;
 
   var tcpHdrLen = 20;
   var ipHdrLen = opts.ihl == null ? 20 : opts.ihl;
-  var totalLen = ipHdrLen + tcpHdrLen + payload.length;
+  var totalLen =
+    ipHdrLen + (rawIp ? rawIp.length : tcpHdrLen + payload.length);
   if (opts.totalLen != null) totalLen = opts.totalLen;
 
   var ip = Buffer.alloc(ipHdrLen);
@@ -43,14 +47,14 @@ function buildFrame(opts) {
   tcp[13] = opts.flags || 0;
   tcp.writeUInt16BE(opts.window == null ? 64240 : opts.window, 14);
 
-  var frame = Buffer.concat([
+  var l2 = Buffer.concat([
     dstMac,
     srcMac,
     Buffer.from([(ethType >> 8) & 0xff, ethType & 0xff]),
-    ip,
-    tcp,
-    payload,
   ]);
+  var frame = rawIp
+    ? Buffer.concat([l2, ip, rawIp])
+    : Buffer.concat([l2, ip, tcp, payload]);
   return frame;
 }
 

@@ -11,7 +11,7 @@
 | 包数量 | ≤ **2000** 个，超过整份拒绝 |
 | 文件格式 | 小端经典 PCAP（magic `0xa1b2c3d4` 微秒 / `0xa1b23c4d` 纳秒）。大端、pcapng 整份拒绝 |
 | 链路层 | 仅以太网（LINKTYPE_ETHERNET=1），其他链路类型整份拒绝 |
-| 网络层 | 仅 IPv4（非 IPv4 / 非 TCP / 分片只丢该包并注明原因） |
+| 网络层 | 仅 IPv4（非 IPv4 / 非 TCP 只丢该包并注明原因；IPv4 分片先重组再进 TCP 分析） |
 | 传输层 | 仅 TCP |
 
 ## 重组语义（关键安全约束）
@@ -60,13 +60,27 @@ node --test tests/
 - `tests/reference.js` 独立参考重组器（绝对位置 Map，逐字节裁定）；
 - `pcap.test.js` 覆盖文件头拒绝、截断停止、乱序、回绕、重传去重、冲突留证、
   缺口（含无 FIN 不判首尾缺口）、snaplen 截断、双向多连接、2000 上限、
-  跨缺口桥接回归、tokenBox，以及 **300 轮随机对拍**（覆盖区间/缺口/冲突/逐字节）。
+  跨缺口桥接回归、tokenBox、**IPv4 分片**（乱序重组、重复去重、缺片/缺首片、
+  同 IP ID 不同地址隔离、重叠冲突、末片长度矛盾、非法分片、分片抓包截断、
+  分片与普通报文同流重组），以及 **300 轮随机对拍**（覆盖区间/缺口/冲突/逐字节）。
 
 ## 导出
 
 - **JSON（无损）**：每个 data chunk 的 base64 原始字节、来源包、缺口、冲突候选字节、
-  包表、截断证据；
-- **TXT（有损）**：重组文本（非法 UTF-8 显示为 �），缺口/冲突显式标注 + 包表。
+  包表、截断证据、IPv4 分片组（含不完整/冲突组）；
+- **TXT（有损）**：重组文本（非法 UTF-8 显示为 �），缺口/冲突显式标注 + 分片证据 + 包表。
 
-## IPv4 fragment evidence
-IPv4 TCP fragments are assembled before TCP stream analysis. Datagram identity comprises source address, destination address, protocol and IP ID. Exact duplicate fragment bytes do not add TCP bytes; gaps and contradictory overlaps remain explicit evidence and cannot become readable stream content. A complete datagram must include its first fragment, one consistent final length and every declared byte. `fragmentGroups` and packet `fragmentIndexes` are included in the frozen export, including incomplete/conflicting groups. Ordinary nonfragmented parsing is unchanged.
+## IPv4 分片证据
+
+IPv4 分片在 TCP 流重组**之前**按数据报重组，规则与 TCP 重组同级严格：
+
+- **数据报身份 = 源地址 | 目的地址 | 协议 | IP ID**；不同地址间相同 IP ID 的分片互不干扰；
+- 字节一律**按分片偏移落位**，乱序到达不影响结果；**完全重复的分片不增加任何字节**；
+- **缺口**（含未抓全分片的声明尾部）与**矛盾重叠**保留为明确证据，整组不产出正文；
+- **完整** = 首片在 + 最终长度唯一 + 每个声明字节都抓到 + 无冲突；只有完整的组才解码
+  TCP 并进入常规流重组，正文经包级 `fragmentIndexes` 与组内 `segments` 贡献图追溯到来源包；
+- 组状态：`complete` / `incomplete` / `length_mismatch`（末片总长矛盾或分片越出总长）/
+  `conflict` / `invalid`（非末片长度非 8 倍数、越界等）/ `invalid_tcp`；
+- `fragmentGroups`（**含不完整 / 冲突 / 不合法的组**）与包级 `fragmentIndexes`
+  都进入冻结导出，页面分片证据面板与导出引用同一份冻结结果；
+- 普通未分片报文的解析与重组行为完全不变。
