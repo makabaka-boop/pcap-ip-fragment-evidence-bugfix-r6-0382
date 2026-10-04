@@ -673,6 +673,7 @@
       ipTruncated: !!p.ipTruncated,
       discardReason: p.discardReason || null,
       fragmentIndexes: p.fragmentIndexes || null,
+      fragmentGroup: p.fragmentGroup || null,
       connId: p.connId || null,
       dir: p.dir ?? null,
       isRetrans: !!p.isRetrans,

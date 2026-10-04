@@ -94,6 +94,53 @@ function str(s) {
   return Buffer.from(s, "utf8");
 }
 
+/* 构造一个 TCP 报文（TCP 头 + 载荷）——作为被 IPv4 分片携带的字节 */
+function buildTcpSegment(opts) {
+  var payload = opts.payload || Buffer.alloc(0);
+  var tcp = Buffer.alloc(20);
+  tcp.writeUInt16BE(opts.srcPort == null ? 12345 : opts.srcPort, 0);
+  tcp.writeUInt16BE(opts.dstPort == null ? 80 : opts.dstPort, 2);
+  tcp.writeUInt32BE(opts.seq >>> 0, 4);
+  tcp.writeUInt32BE((opts.ack || 0) >>> 0, 8);
+  tcp[12] = 0x50; // dataOffset = 5
+  tcp[13] = opts.flags || 0;
+  tcp.writeUInt16BE(opts.window == null ? 64240 : opts.window, 14);
+  return Buffer.concat([tcp, payload]);
+}
+
+/*
+ * 构造一个 IPv4 分片帧（以太网 + IP 头 + 原始分片字节，无 TCP 头）。
+ * fragWord 直接给出 MF/偏移字段；totalLen 可覆盖以模拟“声明 > 抓到”。
+ */
+function buildFragFrame(opts) {
+  var data = opts.data || Buffer.alloc(0);
+  var srcMac = opts.srcMac || Buffer.from("001122334455", "hex");
+  var dstMac = opts.dstMac || Buffer.from("6677889900aa", "hex");
+  var ipHdrLen = 20;
+  var totalLen = ipHdrLen + data.length;
+  if (opts.totalLen != null) totalLen = opts.totalLen;
+
+  var ip = Buffer.alloc(ipHdrLen);
+  ip[0] = 0x45;
+  ip.writeUInt16BE(totalLen, 2);
+  ip.writeUInt16BE(opts.ipId || 0, 4);
+  ip.writeUInt16BE(opts.fragWord || 0, 6);
+  ip[8] = opts.ttl == null ? 64 : opts.ttl;
+  ip[9] = opts.protocol == null ? 6 : opts.protocol;
+  var srcIp = opts.srcIp || Buffer.from([10, 0, 0, 1]);
+  var dstIp = opts.dstIp || Buffer.from([10, 0, 0, 2]);
+  srcIp.copy(ip, 12);
+  dstIp.copy(ip, 16);
+
+  return Buffer.concat([
+    dstMac,
+    srcMac,
+    Buffer.from([0x08, 0x00]),
+    ip,
+    data,
+  ]);
+}
+
 /* 在文件尾部截断 n 字节（制造 record/frame 截断） */
 function truncateTail(buf, n) {
   return buf.slice(0, buf.length - n);
@@ -111,6 +158,8 @@ function tamperInclLen(buf, recordIndex, newLen) {
 module.exports = {
   buildFrame: buildFrame,
   buildPcap: buildPcap,
+  buildTcpSegment: buildTcpSegment,
+  buildFragFrame: buildFragFrame,
   str: str,
   truncateTail: truncateTail,
   tamperInclLen: tamperInclLen,

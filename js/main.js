@@ -20,6 +20,7 @@
     exportTxt: document.getElementById("export-txt"),
     fileInfo: document.getElementById("file-info"),
     connList: document.getElementById("conn-list"),
+    fragList: document.getElementById("frag-list"),
     connPlaceholder: document.getElementById("conn-placeholder"),
     detail: document.getElementById("detail"),
     status: document.getElementById("status"),
@@ -78,6 +79,7 @@
           setControls(false);
           els.fileInfo.textContent = file.name;
           renderConnections();
+          renderFragmentGroups();
           els.detail.innerHTML = "";
           els.detail.appendChild(placeholder("文件被整份拒绝：" + msg.message));
           showStatus("fatal", msg.message);
@@ -174,15 +176,84 @@
           g.key +
           "：" +
           g.status +
-          "，缺口 " +
-          JSON.stringify(g.holes) +
-          "，冲突 " +
-          JSON.stringify(g.conflicts),
+          (g.detail ? "（" + g.detail + "）" : ""),
       );
     });
     showStatus(st ? "fatal" : "info", msgs.join(" "));
     renderConnections();
+    renderFragmentGroups();
     renderDetail();
+  }
+
+  /* IP 分片组证据：与导出共用同一份冻结结果，常驻侧栏（不随状态条消失） */
+  var FRAG_STATUS_TEXT = {
+    complete: "完整",
+    incomplete: "不完整",
+    conflict: "重叠冲突",
+    length_mismatch: "终止长度不一致",
+    invalid_fragment: "分片不合法",
+    invalid_tcp: "TCP 无效",
+  };
+
+  function renderFragmentGroups() {
+    els.fragList.innerHTML = "";
+    if (!state.result) return;
+    var groups = state.result.fragmentGroups || [];
+    if (!groups.length) return;
+    var hdr = document.createElement("div");
+    hdr.className = "frag-hdr";
+    hdr.textContent = "IP 分片组（" + groups.length + "）";
+    els.fragList.appendChild(hdr);
+    groups.forEach(function (g) {
+      var ok = g.status === "complete";
+      var div = document.createElement("div");
+      div.className = "frag " + (ok ? "ok" : "bad");
+      var html =
+        "<b>" +
+        esc(g.srcIp) +
+        " → " +
+        esc(g.dstIp) +
+        "</b> · id " +
+        g.ipId +
+        ' · <span class="badge ' +
+        (ok ? "ok" : "gap") +
+        '">' +
+        esc(FRAG_STATUS_TEXT[g.status] || g.status) +
+        "</span><br>" +
+        '<span class="kv">成员包 ' +
+        g.indexes
+          .map(function (i) {
+            return "#" + i;
+          })
+          .join(" ") +
+        (g.totalLen != null ? " · 总长 " + g.totalLen : "") +
+        (g.carrierIndex != null ? " · 载体包 #" + g.carrierIndex : "") +
+        (g.dupBytes ? " · 重复字节 " + g.dupBytes : "") +
+        "</span>";
+      if (g.holes && g.holes.length) {
+        html +=
+          '<br><span class="kv">缺口 ' +
+          g.holes
+            .map(function (h) {
+              return h.start + ".." + h.end;
+            })
+            .join(", ") +
+          "</span>";
+      }
+      if (g.conflicts && g.conflicts.length) {
+        html +=
+          '<br><span class="kv">冲突 ' +
+          g.conflicts
+            .map(function (c) {
+              return c.start + ".." + c.end;
+            })
+            .join(", ") +
+          "</span>";
+      }
+      if (g.detail) html += '<br><span class="kv">' + esc(g.detail) + "</span>";
+      div.innerHTML = html;
+      els.fragList.appendChild(div);
+    });
   }
 
   function setControls(parsing) {
@@ -374,6 +445,11 @@
       if (p.payloadTruncated) marks += '<span class="m-trunc">载荷截断</span>';
       if (p.snapTruncated && !p.payloadTruncated)
         marks += '<span class="m-trunc">snap截断</span>';
+      if (p.fragmentIndexes && p.fragmentIndexes.length)
+        marks +=
+          '<span class="m-frag">分片重组×' +
+          p.fragmentIndexes.length +
+          "</span>";
       var last = p.discardReason
         ? '<span class="discard">' + esc(p.discardReason) + "</span>"
         : marks;

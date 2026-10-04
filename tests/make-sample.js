@@ -1,7 +1,8 @@
 /*
  * 生成演示 PCAP：sample-disorder.pcap
  * 包含：握手、乱序数据、相同重传、字节冲突、中间缺口、FIN 后判定首尾缺口、
- * snaplen 截断段，以及第二个连接。
+ * snaplen 截断段、第二个连接，以及 IPv4 分片（乱序到达 + 重复分片的完整组、
+ * 缺中间片的不完整组）。
  * 运行：node tests/make-sample.js
  */
 "use strict";
@@ -75,7 +76,40 @@ const pcap2 = B.buildPcap([
 
 // 手工拼接两个 pcap：保留第二个的全局头替换为记录
 const records2 = pcap2.slice(24);
-const out = Buffer.concat([pcap, records2]);
+
+// 第三部分：IPv4 分片演示
+// 组 1（id 40001）：乱序到达 + 一个完全重复的分片 -> 完整报文进入 TCP 流
+// 组 2（id 40002）：缺中间片 -> 保持 incomplete 证据，不产出正文
+const F = { srcIp: Buffer.from([10, 20, 0, 3]), dstIp: Buffer.from([10, 20, 0, 9]) };
+const fragSeg = B.buildTcpSegment({
+  srcPort: 33000,
+  dstPort: 8080,
+  seq: 5000,
+  flags: 0x18,
+  payload: B.str("FRAGMENTED-REPLY-0123456789"),
+});
+// 报文 47 字节：分片 [0,16) [16,32) [32,47)
+function fragFrame(ipId, off, more, data) {
+  return {
+    frame: B.buildFragFrame({
+      ipId: ipId,
+      fragWord: ((off / 8) & 0x1fff) | (more ? 0x2000 : 0),
+      data: data,
+      srcIp: F.srcIp,
+      dstIp: F.dstIp,
+    }),
+  };
+}
+const pcap3 = B.buildPcap([
+  fragFrame(40001, 16, true, fragSeg.slice(16, 32)), // 中段先到
+  fragFrame(40001, 0, true, fragSeg.slice(0, 16)), // 首片后到
+  fragFrame(40001, 16, true, fragSeg.slice(16, 32)), // 完全重复的中段
+  fragFrame(40001, 32, false, fragSeg.slice(32, 47)), // 末片
+  fragFrame(40002, 0, true, fragSeg.slice(0, 16)), // 第二组：只有首片与末片
+  fragFrame(40002, 32, false, fragSeg.slice(32, 47)), // 中间 16..32 永远缺失
+]);
+
+const out = Buffer.concat([pcap, records2, pcap3.slice(24)]);
 const target = path.join(__dirname, "..", "sample-disorder.pcap");
 fs.writeFileSync(target, out);
 console.log("wrote", target, out.length, "bytes");

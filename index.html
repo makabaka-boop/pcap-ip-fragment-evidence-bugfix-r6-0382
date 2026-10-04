@@ -53,6 +53,13 @@
   .m-ooo { background:#3a351e; color:var(--warn); }
   .m-conflict { background:#3d2020; color:var(--err); }
   .m-trunc { background:#33284a; color:#b794e8; }
+  .m-frag { background:#1e2f3a; color:var(--accent); }
+  #frag-list { border-top:1px solid var(--border); margin-top:4px; }
+  .frag-hdr { padding:8px 14px 2px; color:var(--dim); font-size:11px; }
+  .frag { padding:7px 14px; border-bottom:1px solid var(--border); font-size:11.5px;
+          word-break:break-all; }
+  .frag.ok { border-left:3px solid var(--ok); }
+  .frag.bad { border-left:3px solid var(--warn); }
   .discard { color:var(--dim); font-style:italic; }
   pre.stream { background:#0b0f14; border:1px solid var(--border); border-radius:6px;
     padding:10px 12px; font-family:var(--mono); font-size:12px; white-space:pre-wrap;
@@ -105,6 +112,7 @@
       点击「选择文件」或将 .pcap 拖入页面。<br>所有解析均在本机 Worker 中完成。
     </div>
     <div id="conn-list"></div>
+    <div id="frag-list"></div>
   </aside>
   <section id="detail">
     <div class="placeholder">选择左侧连接查看包、缺口、冲突与重组结果</div>

@@ -274,6 +274,8 @@
       stats: result.stats,
       packets: result.packets,
       connections: conns,
+      // 与页面共用同一份冻结结果：完整/不完整/冲突的分片组证据全部随导出冻结
+      fragmentGroups: result.fragmentGroups || [],
     };
   }
 
@@ -395,6 +397,55 @@
       lines.push("");
     });
 
+    var fragGroups = result.fragmentGroups || [];
+    if (fragGroups.length) {
+      lines.push("=== IPv4 Fragment Groups ===");
+      fragGroups.forEach(function (g) {
+        lines.push(
+          "group " +
+            g.key +
+            "  status=" +
+            g.status +
+            (g.totalLen != null ? "  totalLen=" + g.totalLen : "") +
+            (g.declaredTotals && g.declaredTotals.length
+              ? "  declaredTotals=" + g.declaredTotals.join(",")
+              : "") +
+            "  members=" +
+            g.indexes.join(",") +
+            (g.carrierIndex != null ? "  carrier=pkt" + g.carrierIndex : "") +
+            (g.dupBytes ? "  dupBytes=" + g.dupBytes : ""),
+        );
+        if (g.detail) lines.push("  reasons: " + g.detail);
+        (g.holes || []).forEach(function (h) {
+          lines.push(
+            "  hole " +
+              h.start +
+              ".." +
+              h.end +
+              " (" +
+              (h.end - h.start) +
+              " bytes missing, NOT reconstructed)",
+          );
+        });
+        (g.conflicts || []).forEach(function (c) {
+          c.entries.forEach(function (e) {
+            var parts = Object.keys(e.byPkt).map(function (pi) {
+              return (
+                "pkt" + pi + "=0x" + e.byPkt[pi].toString(16).padStart(2, "0")
+              );
+            });
+            lines.push("  conflict @" + e.pos + ": " + parts.join(", "));
+          });
+        });
+        (g.sources || []).forEach(function (s) {
+          lines.push(
+            "  bytes " + s.start + ".." + s.end + " from pkt" + s.packetIndex,
+          );
+        });
+      });
+      lines.push("");
+    }
+
     lines.push("=== Packets ===");
     lines.push(
       [
@@ -415,6 +466,8 @@
       if (p.outOfOrder) marks.push("ooo");
       if (p.conflictBytes) marks.push("conflict:" + p.conflictBytes);
       if (p.payloadTruncated) marks.push("payload-trunc");
+      if (p.fragmentIndexes)
+        marks.push("ip-frag[" + p.fragmentIndexes.join(",") + "]");
       lines.push(
         [
           p.index,

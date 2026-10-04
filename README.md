@@ -60,7 +60,11 @@ node --test tests/
 - `tests/reference.js` 独立参考重组器（绝对位置 Map，逐字节裁定）；
 - `pcap.test.js` 覆盖文件头拒绝、截断停止、乱序、回绕、重传去重、冲突留证、
   缺口（含无 FIN 不判首尾缺口）、snaplen 截断、双向多连接、2000 上限、
-  跨缺口桥接回归、tokenBox，以及 **300 轮随机对拍**（覆盖区间/缺口/冲突/逐字节）。
+  跨缺口桥接回归、tokenBox，以及 **300 轮随机对拍**（覆盖区间/缺口/冲突/逐字节）；
+- `fragments.test.js` 覆盖 IPv4 分片：乱序重组与来源追溯、重复分片去重、
+  跨地址同 IP ID 隔离、缺口（缺中间片/缺首片/抓包截断）、矛盾重叠留证、
+  终止长度不一致、非法分片、invalid_tcp、导出与页面同源、
+  以及普通未分片报文与分片共存时的既有行为。
 
 ## 导出
 
@@ -69,4 +73,4 @@ node --test tests/
 - **TXT（有损）**：重组文本（非法 UTF-8 显示为 �），缺口/冲突显式标注 + 包表。
 
 ## IPv4 fragment evidence
-IPv4 TCP fragments are assembled before TCP stream analysis. Datagram identity comprises source address, destination address, protocol and IP ID. Exact duplicate fragment bytes do not add TCP bytes; gaps and contradictory overlaps remain explicit evidence and cannot become readable stream content. A complete datagram must include its first fragment, one consistent final length and every declared byte. `fragmentGroups` and packet `fragmentIndexes` are included in the frozen export, including incomplete/conflicting groups. Ordinary nonfragmented parsing is unchanged.
+IPv4 TCP fragments are assembled before TCP stream analysis. Datagram identity comprises source address, destination address, protocol and IP ID — identical IP IDs on different address pairs never interfere. Fragment bytes are placed by their offset, never concatenated in arrival order. Exact duplicate fragment bytes do not add TCP bytes; gaps (including capture-truncated tails that were declared but never captured) and contradictory overlaps remain explicit evidence and cannot become readable stream content. A complete datagram must include its first fragment, one consistent final length (every last-fragment agrees on the total and no fragment overruns it) and every declared byte; illegal fragments (non-final length not a multiple of 8, beyond the maximum datagram size) or an inconsistent final length produce no trusted body. Group status is one of `complete` / `incomplete` / `conflict` / `length_mismatch` / `invalid_fragment` / `invalid_tcp`. A complete datagram is attached to the lowest-index first-fragment packet, whose `fragmentIndexes` (set on every member packet) trace the content back to the original packets; each group also records per-member offsets/captured lengths and byte-range `sources`. `fragmentGroups` (including incomplete/conflicting groups) and packet `fragmentIndexes`/`fragmentGroup` are shown on the page and included in the same frozen export. Ordinary nonfragmented parsing is unchanged.

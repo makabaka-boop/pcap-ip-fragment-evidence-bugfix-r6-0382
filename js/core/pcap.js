@@ -154,6 +154,8 @@
       }
       var declared = totalLen - ihl;
       var available = Math.max(0, Math.min(declared, end - ip0 - ihl));
+      // 声明的分片长度超出抓到的帧：声明而缺失的尾部在重组时是显式缺口
+      if (ip0 + totalLen > end) pkt.ipTruncated = true;
       pkt.fragment = {
         offset: fragOffset * 8,
         more: moreFrags,
